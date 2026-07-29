@@ -234,7 +234,35 @@ def main():
     logger.info(f"Loading tokenizer: {MODEL_NAME}")
     logger.info("=" * 60)
 
+    # ── Tokenize ──
+    logger.info("=" * 60)
+    logger.info(f"Loading tokenizer: {MODEL_NAME}")
+    logger.info("=" * 60)
+
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, local_files_only=True)
+
+    # Ensure label column is int64 and named 'label' (HuggingFace Trainer expects 'label' by default)
+    # This prevents silent dtype/column mismatches that can make the model predict only the majority class.
+    def prepare_dataset(ds):
+        # If dataset has 'labels' or other name, map to 'label'
+        if "labels" in ds.column_names and "label" not in ds.column_names:
+            ds = ds.rename_column("labels", "label")
+        # Force dtype to int64 (torch expects int64 labels)
+        ds = ds.cast_column("label", ds.features["label"].dtype)  # keep same if already correct
+        # If dtype is not int64, convert explicitly
+        try:
+            import datasets as _datasets
+            if str(ds.features["label"].dtype) != "int64":
+                ds = ds.map(lambda x: {"label": int(x["label"])}, num_proc=1)
+        except Exception:
+            # fallback: map to int
+            ds = ds.map(lambda x: {"label": int(x["label"])}, num_proc=1)
+        return ds
+
+    dataset = dataset.map(lambda ex: ex)  # ensure dataset object
+    dataset["train"] = prepare_dataset(dataset["train"])
+    dataset["validation"] = prepare_dataset(dataset["validation"])
+    dataset["test"] = prepare_dataset(dataset["test"])
 
     def tokenize_function(examples):
         return tokenizer(
@@ -244,7 +272,10 @@ def main():
             max_length=MAX_LENGTH,
         )
 
-    tokenized_datasets = dataset.map(tokenize_function, batched=True)
+    tokenized_datasets = dataset.map(tokenize_function, batched=True, remove_columns=dataset["train"].column_names)
+    # Put label column back (ensure Trainer sees it)
+    tokenized_datasets = tokenized_datasets.map(lambda x: {"label": x["label"]}, batched=True)
+
 
     # ── Load model ──
     logger.info("=" * 60)
@@ -315,7 +346,7 @@ def main():
         args=training_args,
         train_dataset=tokenized_datasets["train"],
         eval_dataset=tokenized_datasets["validation"],
-        processing_class=tokenizer,
+        tokenizer=tokenizer,
         compute_metrics=compute_metrics,
         callbacks=callbacks,
     )
