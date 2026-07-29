@@ -1,39 +1,23 @@
 #!/usr/bin/env python3
 # src/train_svm_task_a.py
 """
-Train a TF-IDF + LinearSVC classifier for EDOS Task A (binary sexism detection).
+Train a TF-IDF + LinearSVC classifier for EDOS Task A.
 
-Refactored so the SVM training is encapsulated in a clear `fit_svm` function.
-
-Reads:
-  data/processed/task_a_train.csv
-  data/processed/task_a_dev.csv
-  data/processed/task_a_test.csv
-
-Writes:
-  models/svm/svm_pipeline.joblib
-  models/svm/predictions_test_{timestamp}.csv
-  logs/srv_svm_train_{timestamp}.log
-
-Usage:
-python src/train_svm_task_a.py
-
-train_svm_task_a.py notable args
---train path to train CSV (default data/processed/task_a_train.csv)
---dev path to dev CSV (default data/processed/task_a_dev.csv)
---test path to test CSV (default data/processed/task_a_test.csv)
---out_dir output dir (default models/svm)
---max_features TF‑IDF max features (default 50000)
---ngram_min / --ngram_max ngram range (defaults 1 2)
---stop_words stop words or none (default english)
+Changes:
+- Adds timing for training and evaluation.
+- Prints a single, clearly labeled classification report and confusion matrix per dataset.
+- Saves test predictions with probabilities not applicable for SVM; saves predicted labels.
 """
 
 from pathlib import Path
 from datetime import datetime
 import argparse
 import logging
+import sys
+import time
+
 import pandas as pd
-import joblib
+import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.svm import LinearSVC
 from sklearn.pipeline import Pipeline
@@ -41,16 +25,17 @@ from sklearn.metrics import (
     accuracy_score, precision_recall_fscore_support,
     classification_report, confusion_matrix
 )
+import joblib
 
 
 def setup_logger(log_path: Path):
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[
             logging.FileHandler(log_path, mode="w", encoding="utf-8"),
-            logging.StreamHandler()
+            logging.StreamHandler(sys.stdout)
         ],
     )
     return logging.getLogger(__name__)
@@ -66,19 +51,21 @@ def load_csv(path: Path):
     return df
 
 
-def evaluate(y_true, y_pred, logger, prefix="Test"):
+def evaluate_and_log(y_true, y_pred, logger, dataset_name="Test"):
     acc = accuracy_score(y_true, y_pred)
     prec, rec, f1, _ = precision_recall_fscore_support(y_true, y_pred, average="macro", zero_division=0)
-    report = classification_report(y_true, y_pred, target_names=["not_sexist", "sexist"], digits=4, zero_division=0)
-    cm = confusion_matrix(y_true, y_pred)
-    logger.info(f"--- {prefix} results ---")
+    logger.info(f"--- {dataset_name} basic metrics ---")
     logger.info(f"Accuracy         : {acc:.4f}")
     logger.info(f"Precision (macro): {prec:.4f}")
     logger.info(f"Recall    (macro): {rec:.4f}")
     logger.info(f"F1        (macro): {f1:.4f}")
-    logger.info("Classification report:\n" + report)
-    logger.info(f"Confusion matrix:\n{cm}")
-    logger.info(f"Prediction distribution: not_sexist={int((y_pred==0).sum())}, sexist={int((y_pred==1).sum())}")
+    # Single, clear classification report
+    logger.info(f"{dataset_name} Classification report (computed from the {dataset_name.lower()} dataset):")
+    report = classification_report(y_true, y_pred, target_names=["not_sexist", "sexist"], digits=4, zero_division=0)
+    logger.info("\n" + report)
+    cm = confusion_matrix(y_true, y_pred)
+    logger.info(f"{dataset_name} Confusion matrix:\n{cm}")
+    logger.info(f"{dataset_name} prediction distribution: not_sexist={int((y_pred==0).sum())}, sexist={int((y_pred==1).sum())}")
     return {"accuracy": acc, "precision_macro": prec, "recall_macro": rec, "f1_macro": f1, "confusion_matrix": cm}
 
 
@@ -92,21 +79,6 @@ def fit_svm(
     max_iter=20000,
     class_weight="balanced",
 ):
-    """
-    Fit and return a scikit-learn Pipeline: TF-IDF -> LinearSVC.
-
-    Args:
-      texts: iterable of raw text strings (training data).
-      labels: iterable of integer labels (0/1).
-      max_features: max features for TfidfVectorizer.
-      ngram_range: tuple (min_n, max_n).
-      stop_words: stop words setting for TfidfVectorizer or None.
-      max_iter: max iterations for LinearSVC.
-      class_weight: class_weight passed to LinearSVC (e.g., 'balanced' or dict).
-
-    Returns:
-      pipeline: fitted sklearn Pipeline object.
-    """
     tfidf = TfidfVectorizer(
         max_features=max_features,
         ngram_range=ngram_range,
@@ -121,7 +93,7 @@ def fit_svm(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train TF-IDF + LinearSVC for EDOS Task A (refactored)")
+    parser = argparse.ArgumentParser(description="Train TF-IDF + LinearSVC for EDOS Task A")
     parser.add_argument("--train", default="data/processed/task_a_train.csv")
     parser.add_argument("--dev", default="data/processed/task_a_dev.csv")
     parser.add_argument("--test", default="data/processed/task_a_test.csv")
@@ -143,6 +115,7 @@ def main():
     log_file = LOG_DIR / f"srv_svm_train_{timestamp}.log"
     logger = setup_logger(log_file)
     logger.info(f"Logging to: {log_file}")
+    logger.info(f"Arguments: {args}")
 
     # load data
     logger.info("Loading datasets...")
@@ -154,11 +127,11 @@ def main():
     n_not = int((train_df["label"] == 0).sum())
     logger.info(f"Train class distribution: sexist={n_sexist}, not_sexist={n_not}")
 
-    # prepare stop_words argument
     stop_words = None if str(args.stop_words).lower() == "none" else args.stop_words
 
-    # TRAIN: use the dedicated fit_svm function
+    # TRAIN with timing
     logger.info("Training classifier via fit_svm(...)...")
+    t0 = time.time()
     pipeline = fit_svm(
         train_df["text"].tolist(),
         train_df["label"].values,
@@ -168,16 +141,27 @@ def main():
         max_iter=args.max_iter,
         class_weight="balanced",
     )
+    t1 = time.time()
+    train_time = t1 - t0
+    logger.info(f"Training completed in {train_time:.2f} seconds ({train_time/60:.2f} minutes).")
 
-    # evaluate on dev
+    # evaluate on dev with timing
     logger.info("Evaluating on dev set...")
+    t0 = time.time()
     dev_pred = pipeline.predict(dev_df["text"].tolist())
-    evaluate(dev_df["label"].values, dev_pred, logger, prefix="Dev")
+    t1 = time.time()
+    dev_time = t1 - t0
+    logger.info(f"Dev prediction completed in {dev_time:.2f} seconds ({dev_time/60:.2f} minutes).")
+    evaluate_and_log(dev_df["label"].values, dev_pred, logger, dataset_name="Dev")
 
-    # evaluate on test
+    # evaluate on test with timing
     logger.info("Evaluating on test set...")
+    t0 = time.time()
     test_pred = pipeline.predict(test_df["text"].tolist())
-    evaluate(test_df["label"].values, test_pred, logger, prefix="Test")
+    t1 = time.time()
+    test_time = t1 - t0
+    logger.info(f"Test prediction completed in {test_time:.2f} seconds ({test_time/60:.2f} minutes).")
+    evaluate_and_log(test_df["label"].values, test_pred, logger, dataset_name="Test")
 
     # save pipeline and predictions
     model_path = out_dir / "svm_pipeline.joblib"
@@ -189,6 +173,12 @@ def main():
     preds_csv = out_dir / f"predictions_test_{timestamp}.csv"
     preds_df.to_csv(preds_csv, index=False)
     logger.info(f"Saved test predictions to: {preds_csv}")
+
+    # summary timings
+    logger.info("=== Timing summary ===")
+    logger.info(f"Training time: {train_time:.2f} seconds ({train_time/60:.2f} minutes)")
+    logger.info(f"Dev prediction time: {dev_time:.2f} seconds ({dev_time/60:.2f} minutes)")
+    logger.info(f"Test prediction time: {test_time:.2f} seconds ({test_time/60:.2f} minutes)")
 
     logger.info("Training complete.")
     logger.info(f"Saved artifacts to: {out_dir.resolve()}")
