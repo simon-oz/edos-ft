@@ -22,6 +22,7 @@ Usage:
   From src/ folder:   python parse_edos_data.py
 """
 
+import logging
 import pandas as pd
 import sys
 from pathlib import Path
