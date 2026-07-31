@@ -9,7 +9,7 @@ Supports three modes:
   3. Full fine-tuning with DeepSpeed ZeRO-2 + CPU offload (~65 GB VRAM)
 
 Input:
-  data/processed/task_datasets_a/task_a_{train,custom_dev}.csv
+  data/processed/task_a_{train,dev}.csv
 
 Output:
   models/qwen/task_a/                      — adapters or full model checkpoints
@@ -27,13 +27,6 @@ Usage:
 
   # Different model size
   python src/train_qwen_task_a.py --model_name Qwen/Qwen2.5-14B-Instruct
-
-Prerequisites before running:
-    python src/build_task_datasets.py \
-        --input_dir data/processed/splits_strategy_a \
-        --output_dir data/processed/task_datasets_a
-This creates task_a_train.csv and task_a_custom_dev.csv that the script reads.
-
 """
 
 import sys
@@ -76,7 +69,8 @@ from peft import (
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent if SCRIPT_DIR.name == "src" else SCRIPT_DIR
 
-PROC_DIR = PROJECT_ROOT / "data" / "processed" / "task_datasets_a"
+# FIX: Point to the correct directory containing the processed CSVs
+PROC_DIR = PROJECT_ROOT / "data" / "processed"
 MODEL_DIR = PROJECT_ROOT / "models" / "qwen" / "task_a"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -317,8 +311,8 @@ def evaluate_model(model, tokenizer, eval_dataset, device="cuda", batch_size=8, 
 # ------------------------------------------------------------------
 def parse_args():
     parser = argparse.ArgumentParser(description="Fine-tune Qwen on EDOS Task A")
-    parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-14B-Instruct",
-                        help="HuggingFace model name (e.g., Qwen/Qwen2.5-14B-Instruct)")
+    parser.add_argument("--model_name", type=str, default="/data/models/qwen/qwen2.5-14b-it",
+                        help="Path to local model or HuggingFace model name")
     parser.add_argument("--use_16bit_lora", action="store_true",
                         help="Use LoRA in 16-bit instead of 4-bit QLoRA")
     parser.add_argument("--full_finetune", action="store_true",
@@ -578,7 +572,7 @@ def main():
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=train_dataset,  # Dummy; real eval via callback
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
         callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
     )
