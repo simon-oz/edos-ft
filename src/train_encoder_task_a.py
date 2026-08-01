@@ -24,7 +24,9 @@ Usage (run each member once; point --model_path at the backbone you want):
 
   # Member 2: twHIN-BERT-large (social-media pretrained; the SOTA's partner model)
   CUDA_VISIBLE_DEVICES=0 python src/train_encoder_task_a.py \
-      --model_path --local-dir /data/models/facebook/twhin-bert-large  --out_tag twhin
+      --model_path /data/models/Twitter/twhin-bert-large  --out_tag twhin
+  # Note, using the following cmd to donwload the model
+  # hf download Twitter/twhin-bert-large --local-dir /data/models/Twitter
 
   # (H100 headroom) bigger batch is free and faster:
   ... --batch_size 32
