@@ -34,6 +34,7 @@ import json
 import re
 import logging
 import argparse
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
@@ -211,19 +212,6 @@ class TaskADataCollator:
 # ------------------------------------------------------------------
 # Metrics for generation-based classification
 # ------------------------------------------------------------------
-def compute_metrics_fn(tokenizer, eval_dataset):
-    """Returns a metrics function that uses the model to generate predictions."""
-
-    def compute_metrics(eval_pred):
-        # eval_pred contains (loss, None) during training — we need generation-based eval
-        # For Trainer with compute_metrics, we get logits/labels only during eval
-        # Since we use generation, we'll compute metrics in a custom eval loop instead
-        # This placeholder satisfies the Trainer API
-        return {}
-
-    return compute_metrics
-
-
 def evaluate_model(model, tokenizer, eval_dataset, device="cuda", batch_size=8, max_new_tokens=50):
     """Run generation-based evaluation and return metrics."""
     model.eval()
@@ -307,6 +295,40 @@ def evaluate_model(model, tokenizer, eval_dataset, device="cuda", batch_size=8, 
 
 
 # ------------------------------------------------------------------
+# Custom Trainer for generation-based evaluation
+# ------------------------------------------------------------------
+class QwenTrainer(Trainer):
+    def __init__(self, gen_eval_dataset=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.gen_eval_dataset = gen_eval_dataset
+
+    def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
+        # Skip standard evaluation and run generation-based evaluation instead
+        if self.gen_eval_dataset is None:
+            return super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
+            
+        self.model.eval()
+        
+        start_time = time.time()
+        metrics, _, _ = evaluate_model(
+            self.model, 
+            self.processing_class, 
+            self.gen_eval_dataset, 
+            batch_size=8
+        )
+        eval_time = time.time() - start_time
+        
+        # Add runtime metrics just so Trainer logs them cleanly
+        metrics["eval_runtime"] = round(eval_time, 4)
+        metrics["eval_samples_per_second"] = round(len(self.gen_eval_dataset) / eval_time, 4) if eval_time > 0 else 0.0
+        metrics["eval_steps_per_second"] = 0.0
+        
+        self.log(metrics)
+        self.control = self.callback_handler.on_evaluate(self.args, self.state, self.control, metrics)
+        return metrics
+
+
+# ------------------------------------------------------------------
 # Argument parsing
 # ------------------------------------------------------------------
 def parse_args():
@@ -372,22 +394,25 @@ def main():
 
     train_path = PROC_DIR / "task_a_train.csv"
     dev_path = PROC_DIR / "task_a_custom_dev.csv"
+    test_path = PROC_DIR / "task_a_test.csv"
 
     # Fallback to official dev if custom_dev doesn't exist yet
     if not dev_path.exists():
         dev_path = PROC_DIR / "task_a_dev.csv"
         logger.info(f"custom_dev not found, using official dev: {dev_path}")
 
-    for p in [train_path, dev_path]:
+    for p in [train_path, dev_path, test_path]:
         if not p.exists():
             logger.error(f"Missing: {p}")
             sys.exit(1)
 
     df_train = pd.read_csv(train_path)
     df_dev = pd.read_csv(dev_path)
+    df_test = pd.read_csv(test_path)
 
     logger.info(f"Train samples : {len(df_train)}")
     logger.info(f"Dev samples   : {len(df_dev)}")
+    logger.info(f"Test samples  : {len(df_test)}")
     logger.info(f"Train class distribution: {dict(df_train['label'].value_counts().sort_index())}")
 
     # Format for causal LM
@@ -399,6 +424,8 @@ def main():
 
     # Keep raw text/label for evaluation
     dev_eval = [{"text": row["text"], "label": row["label"]} for _, row in df_dev.iterrows()]
+    test_eval = [{"text": row["text"], "label": row["label"]} for _, row in df_test.iterrows()]
+
 
     # ------------------------------------------------------------------
     # 2. Load tokenizer
@@ -531,54 +558,25 @@ def main():
     logger.info(f"Save every         : {args.save_steps} steps")
 
     # ------------------------------------------------------------------
-    # 7. Custom callback for generation-based evaluation
+    # 7. Trainer
     # ------------------------------------------------------------------
-    class GenerationEvalCallback:
-        """Custom callback to run generation-based evaluation during training."""
+    # Note: We use our custom QwenTrainer so that evaluate() runs generation
+    # and returns eval_f1_macro natively. This allows EarlyStoppingCallback 
+    # and load_best_model_at_end to work perfectly.
 
-        def __init__(self, eval_dataset, tokenizer, eval_steps=100):
-            self.eval_dataset = eval_dataset
-            self.tokenizer = tokenizer
-            self.eval_steps = eval_steps
-            self.best_f1 = 0.0
-
-        def on_step_end(self, args, state, control, model=None, **kwargs):
-            if state.global_step % self.eval_steps == 0 and state.global_step > 0:
-                logger.info(f"\n[Step {state.global_step}] Running generation-based evaluation...")
-                metrics, preds, labels = evaluate_model(
-                    model, self.tokenizer, self.eval_dataset, batch_size=8
-                )
-                for k, v in metrics.items():
-                    logger.info(f"  {k:30s}: {v:.4f}" if isinstance(v, float) else f"  {k:30s}: {v}")
-
-                if metrics["eval_f1_macro"] > self.best_f1:
-                    self.best_f1 = metrics["eval_f1_macro"]
-                    logger.info(f"  *** New best F1: {self.best_f1:.4f} ***")
-
-                # Log to state for Trainer
-                for k, v in metrics.items():
-                    state.log_history[-1][k] = v
-
-            return control
-
-    # ------------------------------------------------------------------
-    # 8. Trainer
-    # ------------------------------------------------------------------
-    # Note: We use a simple Trainer for training; evaluation is done via callback
-    # because generation-based metrics cannot be computed from logits alone.
-
-    trainer = Trainer(
+    trainer = QwenTrainer(
+        gen_eval_dataset=dev_eval,
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=train_dataset,  # Dummy; real eval via callback
+        eval_dataset=dev_dataset,  # Now passing actual dev_dataset
         processing_class=tokenizer,
         data_collator=data_collator,
         callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
     )
 
     # ------------------------------------------------------------------
-    # 9. Train
+    # 8. Train
     # ------------------------------------------------------------------
     logger.info("=" * 60)
     logger.info("Starting training")
@@ -589,24 +587,41 @@ def main():
     logger.info(f"  Final train loss: {train_result.training_loss:.4f}")
 
     # ------------------------------------------------------------------
-    # 10. Final evaluation on dev set
+    # 9. Final evaluation on dev set
     # ------------------------------------------------------------------
     logger.info("=" * 60)
     logger.info("Final evaluation on DEV set (generation-based)")
     logger.info("=" * 60)
 
-    final_metrics, final_preds, final_labels = evaluate_model(
+    dev_metrics, dev_preds, dev_labels = evaluate_model(
         model, tokenizer, dev_eval, batch_size=8
     )
 
-    for k, v in final_metrics.items():
+    for k, v in dev_metrics.items():
         if isinstance(v, float):
             logger.info(f"  {k:30s}: {v:.4f}")
         else:
             logger.info(f"  {k:30s}: {v}")
 
     # ------------------------------------------------------------------
-    # 11. Save model
+    # 9.1 Final evaluation on test set
+    # ------------------------------------------------------------------
+    logger.info("=" * 60)
+    logger.info("Final evaluation on TEST set (generation-based)")
+    logger.info("=" * 60)
+
+    test_metrics, test_preds, test_labels = evaluate_model(
+        model, tokenizer, test_eval, batch_size=8
+    )
+
+    for k, v in test_metrics.items():
+        if isinstance(v, float):
+            logger.info(f"  {k:30s}: {v:.4f}")
+        else:
+            logger.info(f"  {k:30s}: {v}")
+
+    # ------------------------------------------------------------------
+    # 10. Save model
     # ------------------------------------------------------------------
     logger.info("=" * 60)
     logger.info("Saving model")
@@ -632,10 +647,15 @@ def main():
         "lora_alpha": args.lora_alpha if not args.full_finetune else None,
         "train_samples": len(df_train),
         "dev_samples": len(df_dev),
-        "final_dev_f1_macro": float(final_metrics["eval_f1_macro"]),
-        "final_dev_accuracy": float(final_metrics["eval_accuracy"]),
-        "final_dev_f1_sexist": float(final_metrics["eval_f1_sexist"]),
-        "final_dev_f1_not_sexist": float(final_metrics["eval_f1_not_sexist"]),
+        "test_samples": len(df_test),
+        "final_dev_f1_macro": float(dev_metrics["eval_f1_macro"]),
+        "final_dev_accuracy": float(dev_metrics["eval_accuracy"]),
+        "final_dev_f1_sexist": float(dev_metrics["eval_f1_sexist"]),
+        "final_dev_f1_not_sexist": float(dev_metrics["eval_f1_not_sexist"]),
+        "final_test_f1_macro": float(test_metrics["eval_f1_macro"]),
+        "final_test_accuracy": float(test_metrics["eval_accuracy"]),
+        "final_test_f1_sexist": float(test_metrics["eval_f1_sexist"]),
+        "final_test_f1_not_sexist": float(test_metrics["eval_f1_not_sexist"]),
         "timestamp": timestamp,
     }
 

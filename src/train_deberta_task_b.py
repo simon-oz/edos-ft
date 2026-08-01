@@ -292,7 +292,7 @@ if __name__ == "__main__":
     logger.info("Evaluating on TEST set")
     logger.info("=" * 60)
 
-    test_results = trainer.evaluate(tokenized_datasets["test"])
+    test_results = trainer.evaluate(tokenized_datasets["test"], metric_key_prefix="test")
 
     logger.info("Test set results:")
     for key, value in test_results.items():
@@ -323,11 +323,11 @@ if __name__ == "__main__":
         "test_samples": len(dataset["test"]),
         "best_checkpoint": trainer.state.best_model_checkpoint,
         "best_dev_f1": float(trainer.state.best_metric) if trainer.state.best_metric else None,
-        "test_f1_macro": float(test_results.get("eval_f1_macro", 0)),
-        "test_accuracy": float(test_results.get("eval_accuracy", 0)),
+        "test_f1_macro": float(test_results.get("test_f1_macro", 0)),
+        "test_accuracy": float(test_results.get("test_accuracy", 0)),
         "timestamp": timestamp,
     }
-
+    
     with open(MODEL_DIR / "training_summary.json", "w") as f:
         json.dump(summary, f, indent=2)
 
