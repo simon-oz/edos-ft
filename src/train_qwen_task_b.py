@@ -175,7 +175,7 @@ def likelihood_probs(model, tokenizer, texts, device, batch_size=8, max_length=5
                 sel = logp[:, P - 1:P - 1 + C, :]
                 tok_ids = comp_t.expand(B, -1)
                 token_logprobs = sel.gather(-1, tok_ids.unsqueeze(-1)).squeeze(-1)
-                lp = token_logprobs.sum(1) / C
+                lp = token_logprobs.sum(1)
                 per.extend(lp.float().cpu().tolist())
             scores[cls] = np.array(per, dtype=np.float64)
     finally:
@@ -198,12 +198,15 @@ def parse_args():
     p.add_argument("--max_length", type=int, default=512)
     p.add_argument("--batch_size", type=int, default=2)
     p.add_argument("--grad_accum", type=int, default=4)
-    p.add_argument("--epochs", type=int, default=5)
-    p.add_argument("--lr", type=float, default=2e-4)
-    p.add_argument("--lora_r", type=int, default=128)
-    p.add_argument("--lora_alpha", type=int, default=256)
+    p.add_argument("--epochs", type=int, default=8)
+    p.add_argument("--lr", type=float, default=5e-5)
+    p.add_argument("--lora_r", type=int, default=16)
+    p.add_argument("--lora_alpha", type=int, default=32)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--score_batch_size", type=int, default=8)
+    p.add_argument("--no_balance", dest="balance", action="store_false",
+                   help="Disable class-balancing of the SFT stream (default: balance)")
+    p.set_defaults(balance=True)    
     return p.parse_args()
 
 
@@ -234,6 +237,25 @@ def main():
     logger.info(f"Train={len(df_train)}  Dev={len(df_dev)}  Test={len(df_test)}  "
                 f"num_classes={num_classes}")
     logger.info(f"Train class distribution: {dict(df_train['label'].value_counts().sort_index())}")
+
+    # ===== Balance the SFT stream across the 4 classes =====
+    # Without this the 89/454/333/94 skew teaches the model the base-rate, not the
+    # conditional digit -> it collapses to the mode. Repeat each class up to the max
+    # count, but cap repetition at 5x so tiny classes aren't memorised.
+    if args.balance:
+        counts = df_train["label"].value_counts()
+        max_c = int(counts.max()); cap = 5
+        parts = []
+        for lab in sorted(df_train["label"].unique()):
+            sub = df_train[df_train["label"] == lab]
+            target = min(max_c, cap * len(sub))
+            reps = max(1, int(np.ceil(target / len(sub))))
+            parts.append(pd.concat([sub] * reps, ignore_index=True))
+        df_train = (pd.concat(parts, ignore_index=True)
+                      .sample(frac=1.0, random_state=args.seed)
+                      .reset_index(drop=True))
+        logger.info(f"Balanced train size: {len(df_train)} (per-class cap={cap}x)")
+        logger.info(f"Balanced distribution: {dict(df_train['label'].value_counts().sort_index())}")
 
     train_dataset = Dataset.from_list([format_chat_example(r["text"], r["label"]) for _, r in df_train.iterrows()])
     dev_dataset = Dataset.from_list([format_chat_example(r["text"], r["label"]) for _, r in df_dev.iterrows()])
