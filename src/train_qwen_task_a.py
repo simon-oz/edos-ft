@@ -23,7 +23,7 @@ Usage:
 
   CUDA_VISIBLE_DEVICES=0 python src/train_qwen_task_a.py \
     --lr 1e-4 --lora_r 16 --lora_alpha 32 --epochs 3
-    
+
   CUDA_VISIBLE_DEVICES=0 python src/train_qwen_task_a.py --use_16bit_lora \
     --lr 5e-5 --lora_r 16 --lora_alpha 32 --epochs 3
 
@@ -319,6 +319,10 @@ def main():
     test_pred = (test_probs >= best_t).astype(int)
     pc = f1_score(test_labels, test_pred, average=None, zero_division=0)
     test_f1 = float(f1_score(test_labels, test_pred, average="macro", zero_division=0))
+    logger.info(f"Qwen TEST f1_macro    @{best_t:.3f} (tuned) = {test_f1:.4f}")
+    logger.info(f"Qwen TEST f1_sexist                       = {float(pc[1]) if len(pc) > 1 else 0.0:.4f}")
+    logger.info(f"Qwen TEST f1_not_sexist                   = {float(pc[0]) if len(pc) > 0 else 0.0:.4f}")
+
     logger.info("Qwen TEST (final look, tuned threshold):")
     logger.info("\n" + classification_report(test_labels, test_pred,
                                              target_names=["not_sexist", "sexist"], digits=4))
