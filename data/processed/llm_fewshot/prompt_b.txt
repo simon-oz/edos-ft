@@ -1,0 +1,72 @@
+=== SYSTEM ===
+You are an expert annotator for the EDOS dataset. Assign each post to exactly one sexism category, or "none" if the post is NOT sexist.
+1 = Threats, plans to harm and incitement: threatens, plans, or encourages harm toward women.
+2 = Derogation: demeans, dehumanises, or sexually objectifies women (descriptive / aggressive attacks).
+3 = Animosity: casual gendered slurs, profanity, insults, immutable-gender-difference claims, stereotypes, backhanded compliments.
+4 = Prejudiced discussions: supports or justifies mistreatment of women, individually or as a group.
+For each post, answer with exactly one token: 1, 2, 3, 4, or "none" (none = the post is not sexist).
+
+=== EXAMPLES ===
+[Example 1]
+Text: "Jesus of course it was her fault and the rape was the worst part. But the dad was a slimy piece of shit who was proud of it which is not cool and probably harms the kids a whole lot too."
+predicted: 4
+
+[Example 2]
+Text: "Well first women are COMBATANTS now, in case you didn't know it. Like I said, more female corpses than men, hanging from light poles on the day of the rope. Chivalry is dead, you dumb cunt. You'd better buy a weapon, and learn to shut your mouth."
+predicted: 1
+
+[Example 3]
+Text: "cope, if you are 20yo+ and virgin you will be virgin the rest of your life (if you dont pay a hooker or marry a single mother ofc)"
+predicted: 3
+
+[Example 4]
+Text: "Married man having sex with a teenage girl.Cigars in the Vigina.Hillary behind curtain rubbing her pussy.No it wasn’t rape it was a casual 3000 blowjobs"
+predicted: 4
+
+[Example 5]
+Text: "Just convert to Islam and shout Allahu Akbar before you assault woman from now on. If your a muzzie they will literally give you a medal and they keys to the city when you throw acid in a whores face."
+predicted: 1
+
+[Example 6]
+Text: "Aaaannnddd she a libtard, snowflake, too stupid to realize she is breaking the law. Also batshit crazy, that’s why she preys on young men that don’t know any better yet. Your typical skank cum dumpster."
+predicted: 2
+
+[Example 7]
+Text: "She confuses guilt and rape. Since guilt is harder to bear than blame, she chooses the second. Women are weak, don't expect them to make ANY good decision, they will always take the easy one. I could come back to Christianity now... but I won't."
+predicted: 3
+
+[Example 8]
+Text: "This is so fucked. "Harmless" women coming in is a problem but have dangerous men is not. Man this is really insane"
+predicted: 4
+
+[Example 9]
+Text: ""I used to be an incel"...so now your banging bitches and no longer incel?"
+predicted: 3
+
+[Example 10]
+Text: "A beautiful pro-life girl's face is used for abortionist propaganda. This needs to stop. #prolife #killabortionnotchildren #abortion #unbornlivesmatter [URL]"
+predicted: none
+
+[Example 11]
+Text: "ladies, let's give a new paradigm a few centuries. you jump in front of a bullet to save men like me. then, maybe, we will see if you are worth our time again. if not, enjoy your rape gangs."
+predicted: 2
+
+[Example 12]
+Text: "Thanks for that. Like the another reply said " don't shit where you eat" Solo girl in a strangers car is dangerous enough as it is"
+predicted: none
+
+[Example 13]
+Text: "Comment of the Day "Hey, we [Apple] have to have a major protest if a man can't go into the female bathroom with little girls, but we don't give a fuck about gays being killed with govt support or actual female discrimination." [URL]"
+predicted: none
+
+[Example 14]
+Text: "That bitch ought to have a husband with his cock silencing her stoopid, jewshit-babbling mouth."
+predicted: 1
+
+[Example 15]
+Text: "Maybe he has a thing for Gauls, a lot of French women are pretty weird looking too"
+predicted: 2
+
+=== NOW CLASSIFY ===
+I've uploaded 8 CSV files (test_id_text_1.csv through test_id_text_8.csv), each containing 500 rows with an `id` and a `text` field. Please classify every row and put your answer in a new field with name `predicted`. Your prediction should only be one of: "1", "2", "3", "4", or "none".
+Return each complete CSV with the same rows in the same order, adding only the `predicted` column, and no other text.

@@ -1,0 +1,30 @@
+=== SYSTEM ===
+You are an expert annotator for the Explainable Detection of Online Sexism (EDOS) dataset.
+Classify each social-media post as exactly one of:
+- sexist : the post expresses sexism toward women — overt hostility, derogation, threats,
+  sexual objectification, OR implicit bias, stereotypes, sarcasm, dog-whistles, and
+  backhanded compliments that demean or subordinate women.
+- none   : the post is NOT sexist (it may mention women or gender neutrally, discuss
+  politics or other topics, or use profanity that is not directed as sexism).
+For each post, answer with exactly one token: "sexist" or "none".
+
+=== EXAMPLES ===
+[Example 1]
+Text: "OK, so now let's hope she goes home and stress eats everything in sight and blows her fake heart out."
+predicted: sexist
+
+[Example 2]
+Text: "Hahahah aren't they??? The little guy/gal was bobbing up and down to the beat. Such a cutey. I love sea creatures. Wish I could swim with them!!"
+predicted: none
+
+[Example 3]
+Text: "Terrible advice, just go to dinner. Go on for the kiss when it feels right and she will know what's up.dont fuck it up before it even begins, saying wear something sexy just comes off creepy"
+predicted: none
+
+[Example 4]
+Text: "That robber is the physical expression of a woman's inner Self.. in other words more manlier than Batman(in a bad way)!"
+predicted: sexist
+
+=== NOW CLASSIFY ===
+I've uploaded 8 CSV files (test_id_text_1.csv through test_id_text_8.csv), each containing 500 rows with an `id` and a `text` field. Please classify every row and put your answer in a new field with name `predicted`. Your prediction should only be one of: "sexist" or "none".
+Return each complete CSV with the same rows in the same order, adding only the `predicted` column, and no other text.

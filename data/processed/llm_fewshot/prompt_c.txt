@@ -1,0 +1,115 @@
+=== SYSTEM ===
+You are an expert annotator for the EDOS dataset. Assign each post to exactly one fine-grained sexism vector, or "none" if the post is NOT sexist.
+1.1 = Threats: direct threats of harm toward women.
+1.2 = Incitement and encouragement of harm.
+2.1 = Descriptive attacks on women's appearance / character.
+2.2 = Aggressive and emotive attacks on women.
+2.3 = Dehumanising attacks & overt sexual objectification.
+3.1 = Casual use of gendered slurs, profanities, and insults.
+3.2 = Immutable gender differences and gender stereotypes.
+3.3 = Backhanded gendered compliments.
+3.4 = condescending explanations or unwelcome advice
+4.1 = Supporting mistreatment of individual women.
+4.2 = Supporting mistreatment of women as a group.
+For each post, answer with exactly one token: 1.1, 1.2, 2.1, 2.2, 2.3, 3.1, 3.2, 3.3, 3.4, 4.1, 4.2, or "none" (none = the post is not sexist).
+
+=== EXAMPLES ===
+[Example 1]
+Text: "Why does everyone think she's hot? Nice body, butterface."
+predicted: 3.3
+
+[Example 2]
+Text: "little girl, youre really the boss--come back tomorrow and find out how"
+predicted: 3.4
+
+[Example 3]
+Text: "Punch her in the head and then punch her bf in the head and then stand there flexing over the pair while yelling DONT TOUCH ME."
+predicted: 1.2
+
+[Example 4]
+Text: "Nope, not alone. And some are just ok in appearance, but there's this sort of thing to them, you know they'll be hot in the sack. I don't mean the sluttiness, I mean the... hawt? Whatever."
+predicted: 3.1
+
+[Example 5]
+Text: "if she is so perfect why her husband presumably cheated on her? also, she don't understand that men need variety. how long can you go with just one vagina? ;p besides, hello: [URL]"
+predicted: 2.3
+
+[Example 6]
+Text: "The Brexit headbangers understand the EU far better than Theresa May [URL]"
+predicted: none
+
+[Example 7]
+Text: "My God what a dumb bitch"
+predicted: 2.2
+
+[Example 8]
+Text: "This is why women used to not get to make serious choices"
+predicted: 4.2
+
+[Example 9]
+Text: "All women are inherently untrustworthy. Some women are fat. Therefore fat women are inherently untrustworthy."
+predicted: 2.1
+
+[Example 10]
+Text: "The only people who take the wails of despair seriously are white conservatives, if we did not do so and we refused to white knight for these white fembots the people of color would enslave them."
+predicted: 2.3
+
+[Example 11]
+Text: "Bro you’re good! At any point in a conversation with a woman you can say exactly this: “can I cook for you sometime” or “Want to listen to me play music” and they will melt hahaa"
+predicted: 3.2
+
+[Example 12]
+Text: "Yup. If a girl turns you down for the 8th grade formal, then she deserves to be brutally raped. That's what it boils down to."
+predicted: 4.1
+
+[Example 13]
+Text: "How is it rationalized? A Tom boy with a pretty face, nice tits and a big ass is still gonna get attention from guys regardless of how she acts."
+predicted: 3.3
+
+[Example 14]
+Text: "I got "metoo-ed" holy shit lol. It's funny and also scarily possible."
+predicted: 4.1
+
+[Example 15]
+Text: "this looks like an ex-wives' convention on the way to a lobby to demand the feds double their alimony settlements"
+predicted: 3.2
+
+[Example 16]
+Text: "I never seem to get the tranny porn on my feed but I exclusively use the app and not the website maybe that's why?"
+predicted: 3.1
+
+[Example 17]
+Text: "I would kill your mother to get a shot at you."
+predicted: 1.1
+
+[Example 18]
+Text: "I hope she gets raped by a transgender women named Bruno lol!"
+predicted: 1.2
+
+[Example 19]
+Text: "I don't understand your problem. Most people here hate that they are attracted to women, once they know their nature. I envy you."
+predicted: 2.2
+
+[Example 20]
+Text: "As some random person once said on Twitter: "any female born after 1993 can't cook... all they know is mcdonald's , charge they phone, twerk, be bisexual , eat hot chip & lie.""
+predicted: 2.1
+
+[Example 21]
+Text: "This idiot Madonna told Kelly Ripa hug my breast on ABC at 9 AM in the morning ,and you wonder why men have mixed signals. Time for women to lose jobs for touching men. [URL]"
+predicted: 4.2
+
+[Example 22]
+Text: "This right here! Yes! They want special rights not equal responsibilities. If you ask for equal responsibility from them, they will paradoxically say that is sexist as well! "I'm a lady, treat me as such!""
+predicted: 3.4
+
+[Example 23]
+Text: "As a kid, I grew up in my teen years on the streets. She wouldn't have succeed in hitting more than twice before I beat the living hell out of her."
+predicted: 1.1
+
+[Example 24]
+Text: "She's still around. Released her latest album in 2008. [URL]"
+predicted: none
+
+=== NOW CLASSIFY ===
+I've uploaded 8 CSV files (test_id_text_1.csv through test_id_text_8.csv), each containing 500 rows with an `id` and a `text` field. Please classify every row and put your answer in a new field with name `predicted`. Your prediction should only be one of: "1.1", "1.2", "2.1", "2.2", "2.3", "3.1", "3.2", "3.3", "3.4", "4.1", "4.2", or "none".
+Return each complete CSV with the same rows in the same order, adding only the `predicted` column, and no other text.
