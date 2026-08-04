@@ -19,6 +19,12 @@ Output: models/qwen/task_c/ — adapters / checkpoints
 Usage:
   CUDA_VISIBLE_DEVICES=0 python src/train_qwen_task_c.py --use_16bit_lora
   CUDA_VISIBLE_DEVICES=0 python src/train_qwen_task_c.py --use_16bit_lora --calibrate
+  CUDA_VISIBLE_DEVICES=0 python src/train_qwen_task_c.py --use_16bit_lora \                                        
+    --balance_floor 150 --lr 2e-5 --lora_r 32 --lora_alpha 64 --epochs 6
+
+  CUDA_VISIBLE_DEVICES=0 python src/train_qwen_task_c.py --use_16bit_lora \
+    --lr 5e-5 --lora_r 16 --lora_alpha 32 --epochs 3 --label_smoothing 0.05    
+
 """
 import sys, json, re, logging, argparse, time
 from datetime import datetime
@@ -196,6 +202,8 @@ def parse_args():
     p.add_argument("--calibrate", action="store_true",
                    help="Dev-tuned per-class weight calibration before argmax (optional)")
     p.set_defaults(balance=True)
+    p.add_argument("--balance_floor", type=int, default=0,
+                help="Minimum samples per class after balancing (0=off), e.g. 150")
     return p.parse_args()
 
 
@@ -246,7 +254,8 @@ def main():
         parts = []
         for lab in sorted(df_train["label"].unique()):
             sub = df_train[df_train["label"] == lab]
-            target = min(max_c, cap * len(sub))
+            base = min(max_c, cap * len(sub))
+            target = max(base, args.balance_floor) if args.balance_floor > 0 else base
             reps = max(1, int(np.ceil(target / len(sub))))
             parts.append(pd.concat([sub] * reps, ignore_index=True))
         df_train = (pd.concat(parts, ignore_index=True)
