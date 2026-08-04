@@ -265,7 +265,7 @@ def main():
     print(f"\nDone. Outputs in: {out_dir}")
     print(f"Upload prompt_<task>.txt together with test_id_text_1.csv ... "
           f"test_id_text_{num_chunks}.csv to your LLM;")
-    print("it should return each CSV with an added `predicted` column.")
+    print("it should return one NEW CSV per chunk containing ONLY `id,predicted`.")
 
 
 if __name__ == "__main__":
