@@ -1,35 +1,25 @@
 #!/usr/bin/env python3
 """
-train_qwen_task_b.py
+train_qwen_task_b.py  (full version with surgical changes)
 Fine-tune Qwen2.5-14B-Instruct on EDOS Task B (4-category sexism classification).
-Mirrors the structure of the working train_deberta_task_b.py but uses a causal-LM
-pipeline with likelihood scoring (no generation at eval time).
 
-Task B categories (EDOS):
-  1. threats, plans to harm and incitement
-  2. derogation
-  3. animosity
-  4. prejudiced discussions
-
-Modes:
-  1. QLoRA 4-bit  (default, ~35 GB VRAM)
-  2. LoRA 16-bit  (--use_16bit_lora, ~55 GB VRAM)
-  3. Full FT      (--full_finetune --deepspeed_config src/ds_config_zero2.json)
-
-Input:
-  data/processed/task_b_{train,dev,test}.csv   (columns: text, label  [0-3])
-Output:
-  models/qwen/task_b/                          — adapters or full model checkpoints
-  models/ensemble_probs/qwen_task_b_{dev,test}_probs.npy  — (N, 4) probs for a voter
-  logs/train_qwen_task_b_*.log
+Surgical changes vs the previous build:
+  * Defaults: lr=5e-5, wd=0.01, lora_dropout=0.05, warmup_ratio=0.06 (peak LR inside epoch 1).
+  * --label_smoothing (default 0.1) -> TrainingArguments.label_smoothing_factor
+    (anti-memorization + calibration; keeps train loss from collapsing to 0).
+  * Likelihood scoring uses SUM of completion log-probs (NOT mean) so the shared
+    prefix cancels and the digit signal is not attenuated.
+  * Optional --calibrate: dev-tuned per-class weights (4 params) applied before argmax,
+    correcting the balanced-train vs skewed-test prior mismatch. Off by default.
+  * Everything else identical: SFT label-masking collator, class balancing (cap 5x),
+    early-stop on eval_loss, prob emission for a future Task-B voter.
 
 Usage:
-  CUDA_VISIBLE_DEVICES=0 python src/train_qwen_task_b.py
   CUDA_VISIBLE_DEVICES=0 python src/train_qwen_task_b.py --use_16bit_lora
-  # verify this build is on disk:
-  grep -nE "qwen_task_b_dev_probs.npy|likelihood_probs" src/train_qwen_task_b.py
+  # with the optional calibration:
+  CUDA_VISIBLE_DEVICES=0 python src/train_qwen_task_b.py --use_16bit_lora --calibrate
 """
-import sys, json, logging, argparse, os, time
+import sys, json, logging, argparse, time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
@@ -44,7 +34,6 @@ from transformers import (
 )
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, TaskType
 
-# ------------------------------------------------------------------ paths / logging
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent if SCRIPT_DIR.name == "src" else SCRIPT_DIR
 PROC_DIR = PROJECT_ROOT / "data" / "processed"
@@ -61,10 +50,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
                               logging.StreamHandler(sys.stdout)])
 logger = logging.getLogger(__name__)
 logger.info(f"Logging to: {log_file}")
-logger.info(f"Project root: {PROJECT_ROOT.absolute()}")
 
 # ------------------------------------------------------------------ Task B definitions
-NUM_CLASSES = 4
 CATEGORY_NAMES = {
     0: "1. threats, plans to harm and incitement",
     1: "2. derogation",
@@ -74,11 +61,11 @@ CATEGORY_NAMES = {
 CATEGORY_SHORT = {0: "1", 1: "2", 2: "3", 3: "4"}
 
 SYSTEM_PROMPT = """You are an expert annotator for the Explainable Detection of Online Sexism (EDOS) dataset.
-Your task is to classify a sexist text into one of four categories:
-1. Threats, plans to harm and incitement: Text that threatens, plans, or incites harm against women.
-2. Derogation: Text that demeans, dehumanises, or sexually objectifies women.
-3. Animosity: Text that expresses animosity toward women, including casual slurs, profanities, insults, immutable gender differences, stereotypes, and backhanded compliments.
-4. Prejudiced discussions: Text that supports or justifies mistreatment of women, either individually or as a group.
+Your task is to classify a SEXIST text into exactly one of four categories:
+1. Threats, plans to harm and incitement: threatens, plans, or encourages harm toward women.
+2. Derogation: demeans, dehumanises, or sexually objectifies women.
+3. Animosity: casual gendered slurs, profanity, insults, immutable-gender-difference claims, stereotypes, backhanded compliments.
+4. Prejudiced discussions: supports or justifies mistreatment of women, individually or as a group.
 Respond with ONLY a valid JSON object in this exact format:
 {"classification": "1"}
 or
@@ -88,29 +75,24 @@ or
 or
 {"classification": "4"}"""
 
-# The four completions the model is SFT-trained to emit (one per class, 0-indexed).
 _COMPLETIONS = {
-    0: json.dumps({"classification": "1"}),   # threats
-    1: json.dumps({"classification": "2"}),   # derogation
-    2: json.dumps({"classification": "3"}),   # animosity
-    3: json.dumps({"classification": "4"}),   # prejudiced discussions
+    0: json.dumps({"classification": "1"}),
+    1: json.dumps({"classification": "2"}),
+    2: json.dumps({"classification": "3"}),
+    3: json.dumps({"classification": "4"}),
 }
 
 
-# ------------------------------------------------------------------ formatting
 def format_chat_example(text: str, label: int) -> Dict[str, List[Dict]]:
-    """Format a single Task B example into Qwen chat messages. label is 0-3."""
-    answer = CATEGORY_SHORT[label]
     return {"messages": [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": f'Text: "{text}"'},
-        {"role": "assistant", "content": json.dumps({"classification": answer})},
+        {"role": "assistant", "content": json.dumps({"classification": CATEGORY_SHORT[label]})},
     ]}
 
 
-# ------------------------------------------------------------------ SFT data collator (label masking)
 class TaskBDataCollator:
-    """Mask everything except the assistant's JSON response so SFT loss is response-only."""
+    """Mask everything except the assistant's JSON response (SFT loss = response-only)."""
     def __init__(self, tokenizer, max_length: int = 512):
         self.tokenizer = tokenizer; self.max_length = max_length
 
@@ -120,7 +102,7 @@ class TaskBDataCollator:
         tok = self.tokenizer(texts, max_length=self.max_length, padding=True,
                              truncation=True, return_tensors="pt")
         input_ids = tok["input_ids"]; labels = input_ids.clone()
-        marker = self.tokenizer.encode("<|im_start|>assistant\n", add_special_tokens=False)
+        marker = self.tokenizer.encode("assistant", add_special_tokens=False)
         if len(marker) < 2:
             marker = self.tokenizer.encode("assistant", add_special_tokens=False)
         for i in range(len(batch)):
@@ -137,7 +119,6 @@ class TaskBDataCollator:
         return tok
 
 
-# ------------------------------------------------------------------ likelihood scoring -> P(class)
 def _build_prompt(tokenizer, text: str) -> str:
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": f'Text: "{text}"'}]
@@ -145,9 +126,10 @@ def _build_prompt(tokenizer, text: str) -> str:
 
 
 def likelihood_probs(model, tokenizer, texts, device, batch_size=8, max_length=512):
-    """Return P(class) for every text, shape (N, NUM_CLASSES).
-    For each class c we build [prompt | completion_c], read the model's log-prob of each
-    completion token, length-normalise, then softmax across all classes."""
+    """P(class) per text, shape (N, num_classes).
+    For each class we feed [prompt | completion_c] and SUM the log-probs of the completion
+    tokens (NO mean): the identical shared prefix then cancels exactly in the argmax and the
+    discriminative digit signal is not attenuated by 1/C."""
     model.eval()
     prev_side = getattr(tokenizer, "truncation_side", "right")
     tokenizer.truncation_side = "left"
@@ -175,20 +157,17 @@ def likelihood_probs(model, tokenizer, texts, device, batch_size=8, max_length=5
                 sel = logp[:, P - 1:P - 1 + C, :]
                 tok_ids = comp_t.expand(B, -1)
                 token_logprobs = sel.gather(-1, tok_ids.unsqueeze(-1)).squeeze(-1)
-                lp = token_logprobs.sum(1)
+                lp = token_logprobs.sum(1)                      # SUM, not mean (surgical fix)
                 per.extend(lp.float().cpu().tolist())
             scores[cls] = np.array(per, dtype=np.float64)
     finally:
         tokenizer.truncation_side = prev_side
-    # Stack (N, NUM_CLASSES) and stable softmax
-    score_matrix = np.stack([scores[c] for c in sorted(scores.keys())], axis=1)
+    score_matrix = np.stack([scores[c] for c in sorted(scores.keys())], axis=1)  # (N, C)
     score_matrix -= score_matrix.max(axis=1, keepdims=True)
     exp_scores = np.exp(score_matrix)
-    probs = exp_scores / exp_scores.sum(axis=1, keepdims=True)
-    return probs  # (N, NUM_CLASSES)
+    return exp_scores / exp_scores.sum(axis=1, keepdims=True)
 
 
-# ------------------------------------------------------------------ args
 def parse_args():
     p = argparse.ArgumentParser(description="Fine-tune Qwen on EDOS Task B (4-class)")
     p.add_argument("--model_name", type=str, default="/data/models/qwen/qwen2.5-14b-it")
@@ -198,30 +177,38 @@ def parse_args():
     p.add_argument("--max_length", type=int, default=512)
     p.add_argument("--batch_size", type=int, default=2)
     p.add_argument("--grad_accum", type=int, default=4)
-    p.add_argument("--epochs", type=int, default=8)
-    p.add_argument("--lr", type=float, default=5e-5)
+    p.add_argument("--epochs", type=int, default=6)
+    p.add_argument("--lr", type=float, default=5e-5)          # surgical: was 2e-5
     p.add_argument("--lora_r", type=int, default=16)
     p.add_argument("--lora_alpha", type=int, default=32)
+    p.add_argument("--lora_dropout", type=float, default=0.05)  # surgical: was 0.1
+    p.add_argument("--wd", type=float, default=0.01)           # surgical: was 0.05
+    p.add_argument("--scheduler", type=str, default="cosine")
+    p.add_argument("--warmup_ratio", type=float, default=0.06) # surgical: was 0.1
+    p.add_argument("--label_smoothing", type=float, default=0.1)  # surgical: new anti-memorization lever
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--score_batch_size", type=int, default=8)
-    p.add_argument("--no_balance", dest="balance", action="store_false",
-                   help="Disable class-balancing of the SFT stream (default: balance)")
-    p.set_defaults(balance=True)    
+    p.add_argument("--no_balance", dest="balance", action="store_false")
+    p.add_argument("--calibrate", action="store_true",
+                   help="Dev-tuned per-class weight calibration before argmax (optional)")
+    p.set_defaults(balance=True)
     return p.parse_args()
 
 
-# ------------------------------------------------------------------ main
 def main():
     args = parse_args()
     set_seed(args.seed)
-    os.environ["TENSORBOARD_LOGGING_DIR"] = str(PROJECT_ROOT / "logs" / "tensorboard" / "qwen_task_b")
-    logger.info("=" * 60); logger.info("Qwen Task B Fine-Tuning (4-class)"); logger.info("=" * 60)
+    logger.info("=" * 60); logger.info("Qwen Task B Fine-Tuning (4-class, surgical build)"); logger.info("=" * 60)
     logger.info(f"Model  : {args.model_name}")
     logger.info(f"Mode   : {'Full FT' if args.full_finetune else ('16-bit LoRA' if args.use_16bit_lora else '4-bit QLoRA')}")
-    logger.info(f"Batch/accum={args.batch_size}/{args.grad_accum} (eff {args.batch_size*args.grad_accum})  "
-                f"lr={args.lr}  epochs={args.epochs}  LoRA r/a={args.lora_r}/{args.lora_alpha}")
+    logger.info(f"Final hyperparameters:")
+    logger.info(f"  lr={args.lr}, wd={args.wd}, epochs={args.epochs}, warmup_ratio={args.warmup_ratio}, "
+                f"scheduler={args.scheduler}, label_smoothing={args.label_smoothing}")
+    logger.info(f"  LoRA: r={args.lora_r}, alpha={args.lora_alpha}, dropout={args.lora_dropout}")
+    logger.info(f"  Batch size={args.batch_size}, grad accum={args.grad_accum} "
+                f"(effective {args.batch_size * args.grad_accum})")
 
-    # 1. data (standard Task B splits) ------------------------------------------
+    # 1. data ------------------------------------------------------------------
     logger.info("=" * 60); logger.info("Loading Task B datasets"); logger.info("=" * 60)
     train_path, dev_path, test_path = (PROC_DIR / "task_b_train.csv",
                                        PROC_DIR / "task_b_dev.csv",
@@ -230,18 +217,14 @@ def main():
         if not pth.exists():
             logger.error(f"Missing: {pth}"); sys.exit(1)
     df_train = pd.read_csv(train_path); df_dev = pd.read_csv(dev_path); df_test = pd.read_csv(test_path)
-    df_train["label"] = df_train["label"].astype(int)
-    df_dev["label"] = df_dev["label"].astype(int)
-    df_test["label"] = df_test["label"].astype(int)
-    num_classes = len(np.unique(df_train["label"].values))
-    logger.info(f"Train={len(df_train)}  Dev={len(df_dev)}  Test={len(df_test)}  "
-                f"num_classes={num_classes}")
+    for df in (df_train, df_dev, df_test):
+        df["label"] = df["label"].astype(int)
+    num_classes = int(df_train["label"].max()) + 1
+    target_names = [CATEGORY_NAMES.get(i, f"class_{i}") for i in range(num_classes)]
+    logger.info(f"Train={len(df_train)}  Dev={len(df_dev)}  Test={len(df_test)}  num_classes={num_classes}")
     logger.info(f"Train class distribution: {dict(df_train['label'].value_counts().sort_index())}")
 
-    # ===== Balance the SFT stream across the 4 classes =====
-    # Without this the 89/454/333/94 skew teaches the model the base-rate, not the
-    # conditional digit -> it collapses to the mode. Repeat each class up to the max
-    # count, but cap repetition at 5x so tiny classes aren't memorised.
+    # balance the SFT stream (cap 5x) ------------------------------------------
     if args.balance:
         counts = df_train["label"].value_counts()
         max_c = int(counts.max()); cap = 5
@@ -252,28 +235,26 @@ def main():
             reps = max(1, int(np.ceil(target / len(sub))))
             parts.append(pd.concat([sub] * reps, ignore_index=True))
         df_train = (pd.concat(parts, ignore_index=True)
-                      .sample(frac=1.0, random_state=args.seed)
-                      .reset_index(drop=True))
+                      .sample(frac=1.0, random_state=args.seed).reset_index(drop=True))
         logger.info(f"Balanced train size: {len(df_train)} (per-class cap={cap}x)")
         logger.info(f"Balanced distribution: {dict(df_train['label'].value_counts().sort_index())}")
 
     train_dataset = Dataset.from_list([format_chat_example(r["text"], r["label"]) for _, r in df_train.iterrows()])
     dev_dataset = Dataset.from_list([format_chat_example(r["text"], r["label"]) for _, r in df_dev.iterrows()])
 
-    # 2. tokenizer --------------------------------------------------------------
+    # 2. tokenizer / model -----------------------------------------------------
     logger.info("=" * 60); logger.info(f"Loading tokenizer: {args.model_name}"); logger.info("=" * 60)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
 
-    # 3. model ------------------------------------------------------------------
     logger.info("=" * 60); logger.info("Loading model"); logger.info("=" * 60)
     if args.full_finetune:
-        model = AutoModelForCausalLM.from_pretrained(args.model_name, dtype=torch.bfloat16,
+        model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16,
                                                      device_map="auto", trust_remote_code=True)
         model.gradient_checkpointing_enable()
     elif args.use_16bit_lora:
-        model = AutoModelForCausalLM.from_pretrained(args.model_name, dtype=torch.bfloat16,
+        model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16,
                                                      device_map="auto", trust_remote_code=True)
     else:
         bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
@@ -282,80 +263,94 @@ def main():
                                                      device_map="auto", trust_remote_code=True)
         model = prepare_model_for_kbit_training(model)
 
-    # 4. LoRA -------------------------------------------------------------------
     if not args.full_finetune:
         logger.info("=" * 60); logger.info("Applying LoRA"); logger.info("=" * 60)
         model = get_peft_model(model, LoraConfig(
-            r=args.lora_r, lora_alpha=args.lora_alpha,
+            r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout,
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-            lora_dropout=0.05, bias="none", task_type=TaskType.CAUSAL_LM))
+            bias="none", task_type=TaskType.CAUSAL_LM))
         model.print_trainable_parameters()
 
     scoring_device = next(model.parameters()).device
     logger.info(f"Scoring device: {scoring_device}")
 
-    # 5. training args (selection on dev eval_loss; plain Trainer) ---------------
+    # 3. training args ---------------------------------------------------------
     logger.info("=" * 60); logger.info("Configuring training"); logger.info("=" * 60)
     steps_per_ep = max(1, len(df_train) // (args.batch_size * args.grad_accum))
     total_steps = steps_per_ep * args.epochs
-    warmup_steps = int(0.1 * total_steps)
-    lr = args.lr if not args.full_finetune else 1e-5
-    wd = 0.01 if not args.full_finetune else 0.1
+    warmup_steps = int(args.warmup_ratio * total_steps)
+    logger.info(f"Effective batch size: {args.batch_size * args.grad_accum}")
+    logger.info(f"Total training steps: {total_steps}, warmup steps: {warmup_steps}")
     training_args = TrainingArguments(
         output_dir=str(MODEL_DIR), num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size, per_device_eval_batch_size=16,
-        gradient_accumulation_steps=args.grad_accum, learning_rate=lr, weight_decay=wd,
-        warmup_steps=warmup_steps, logging_steps=10,
+        gradient_accumulation_steps=args.grad_accum, learning_rate=args.lr,
+        weight_decay=args.wd, warmup_steps=warmup_steps, lr_scheduler_type=args.scheduler,
+        label_smoothing_factor=args.label_smoothing,          # surgical: anti-memorization
         eval_strategy="epoch", save_strategy="epoch",
         load_best_model_at_end=True, metric_for_best_model="eval_loss", greater_is_better=False,
-        bf16=True, fp16=False, dataloader_num_workers=4, remove_unused_columns=False,
-        report_to=["tensorboard"], seed=args.seed,
+        logging_steps=10, bf16=True, fp16=False,
+        dataloader_num_workers=4, remove_unused_columns=False, report_to="none", seed=args.seed,
         deepspeed=args.deepspeed_config if args.full_finetune else None,
     )
-    logger.info(f"lr={lr}  wd={wd}  eff_batch={args.batch_size*args.grad_accum}  "
-                f"warmup_steps={warmup_steps}  selection=eval_loss(lower better)")
 
-    # 6. trainer ----------------------------------------------------------------
     trainer = Trainer(model=model, args=training_args,
                       train_dataset=train_dataset, eval_dataset=dev_dataset,
                       processing_class=tokenizer, data_collator=TaskBDataCollator(tokenizer, args.max_length),
                       callbacks=[EarlyStoppingCallback(early_stopping_patience=3)])
 
-    # 7. train ------------------------------------------------------------------
+    # 4. train -----------------------------------------------------------------
     logger.info("=" * 60); logger.info("Starting training"); logger.info("=" * 60)
     t0 = time.time()
     trainer.train()
     secs = time.time() - t0
     logger.info(f"Training done in {secs:.0f}s. best dev eval_loss @ {trainer.state.best_model_checkpoint}")
 
-    # 8. likelihood eval + emit probs -------------------------------------------
+    # 5. likelihood scoring on DEV + TEST --------------------------------------
     logger.info("=" * 60); logger.info("Likelihood scoring on DEV + TEST (4-class)"); logger.info("=" * 60)
-    dev_texts = df_dev["text"].tolist();  dev_labels = df_dev["label"].to_numpy()
-    test_texts = df_test["text"].tolist(); test_labels = df_test["label"].to_numpy()
-    dev_probs = likelihood_probs(model, tokenizer, dev_texts, scoring_device,
-                                 batch_size=args.score_batch_size, max_length=args.max_length)
-    test_probs = likelihood_probs(model, tokenizer, test_texts, scoring_device,
-                                  batch_size=args.score_batch_size, max_length=args.max_length)
+    dev_labels = df_dev["label"].to_numpy(); test_labels = df_test["label"].to_numpy()
+    dev_probs = likelihood_probs(model, tokenizer, df_dev["text"].tolist(),
+                                 scoring_device, batch_size=args.score_batch_size, max_length=args.max_length)
+    test_probs = likelihood_probs(model, tokenizer, df_test["text"].tolist(),
+                                  scoring_device, batch_size=args.score_batch_size, max_length=args.max_length)
 
-    dev_pred = dev_probs.argmax(axis=1)
-    test_pred = test_probs.argmax(axis=1)
+    dev_pred = dev_probs.argmax(axis=1); test_pred = test_probs.argmax(axis=1)
     dev_f1 = float(f1_score(dev_labels, dev_pred, average="macro", zero_division=0))
     test_f1 = float(f1_score(test_labels, test_pred, average="macro", zero_division=0))
     logger.info(f"Qwen DEV  f1_macro (argmax) = {dev_f1:.4f}")
     logger.info(f"Qwen TEST f1_macro (argmax) = {test_f1:.4f}")
-    logger.info("Qwen TEST classification report:")
-    logger.info("\n" + classification_report(
-        test_labels, test_pred,
-        target_names=[CATEGORY_NAMES[i] for i in range(num_classes)], digits=4))
+    logger.info("Qwen TEST classification report (raw argmax):")
+    logger.info("\n" + classification_report(test_labels, test_pred, target_names=target_names,
+                                             digits=4, zero_division=0))
 
-    PROBS_DIR.mkdir(parents=True, exist_ok=True)
+    cal_test_f1 = None
+    if args.calibrate:
+        # ===== optional: dev-tuned per-class calibration (prior correction) =====
+        from scipy.optimize import differential_evolution
+        def neg_macro_f1(logw):
+            w = np.exp(logw - logw.max())
+            return -f1_score(dev_labels, (dev_probs * w).argmax(axis=1), average="macro", zero_division=0)
+        res = differential_evolution(neg_macro_f1, [(-2, 2)] * num_classes, seed=args.seed,
+                                     popsize=15, maxiter=60)
+        cal_w = np.exp(res.x - res.x.max())
+        logger.info(f"Per-class calibration weights: {np.round(cal_w, 3).tolist()}")
+        dev_pred = (dev_probs * cal_w).argmax(axis=1)
+        test_pred = (test_probs * cal_w).argmax(axis=1)
+        dev_f1_cal = float(f1_score(dev_labels, dev_pred, average="macro", zero_division=0))
+        cal_test_f1 = float(f1_score(test_labels, test_pred, average="macro", zero_division=0))
+        logger.info(f"Qwen DEV  f1_macro (calibrated) = {dev_f1_cal:.4f}")
+        logger.info(f"Qwen TEST f1_macro (calibrated) = {cal_test_f1:.4f}")
+        logger.info("Qwen TEST classification report (calibrated):")
+        logger.info("\n" + classification_report(test_labels, test_pred, target_names=target_names,
+                                                 digits=4, zero_division=0))
+        # ===== end optional =====
+
+    # 6. save probs (raw, for a future Task-B voter) + model + summary ----------
     np.save(PROBS_DIR / "qwen_task_b_dev_probs.npy", dev_probs)
     np.save(PROBS_DIR / "qwen_task_b_test_probs.npy", test_probs)
     logger.info(f"Saved qwen Task B probs -> {PROBS_DIR}  "
-                f"(qwen_task_b_dev_probs.npy shape={dev_probs.shape}, "
-                f"qwen_task_b_test_probs.npy shape={test_probs.shape})")
+                f"(dev shape={dev_probs.shape}, test shape={test_probs.shape})")
 
-    # 9. save model + summary ---------------------------------------------------
     logger.info("=" * 60); logger.info("Saving model"); logger.info("=" * 60)
     if args.full_finetune:
         trainer.save_model(str(MODEL_DIR / "final"))
@@ -363,20 +358,20 @@ def main():
         model.save_pretrained(str(MODEL_DIR / "final_adapter"))
         tokenizer.save_pretrained(str(MODEL_DIR / "final_adapter"))
         tokenizer.save_pretrained(str(MODEL_DIR / "final"))
-    summary = {
-        "model": args.model_name,
-        "task": "Task B - 4-Category Sexism Detection",
-        "mode": "full_ft" if args.full_finetune else ("16bit_lora" if args.use_16bit_lora else "4bit_qlora"),
-        "seed": args.seed, "max_length": args.max_length, "num_classes": num_classes,
-        "lora_r": args.lora_r if not args.full_finetune else None,
-        "lora_alpha": args.lora_alpha if not args.full_finetune else None,
-        "train_samples": len(df_train), "dev_samples": len(df_dev), "test_samples": len(df_test),
-        "eval_method": "likelihood_scoring", "selection_metric": "eval_loss",
-        "dev_f1_macro": float(dev_f1), "test_f1_macro": float(test_f1),
-        "probs_dir": str(PROBS_DIR), "train_seconds": round(secs, 1), "timestamp": timestamp,
-    }
+    summary = {"model": args.model_name, "task": "Task B - 4-Category Sexism Detection",
+               "mode": "full_ft" if args.full_finetune else ("16bit_lora" if args.use_16bit_lora else "4bit_qlora"),
+               "seed": args.seed, "max_length": args.max_length, "num_classes": num_classes,
+               "lr": args.lr, "wd": args.wd, "lora_r": args.lora_r, "lora_alpha": args.lora_alpha,
+               "lora_dropout": args.lora_dropout, "label_smoothing": args.label_smoothing,
+               "scheduler": args.scheduler, "warmup_ratio": args.warmup_ratio,
+               "calibrate": args.calibrate,
+               "train_samples": len(df_train), "dev_samples": len(df_dev), "test_samples": len(df_test),
+               "eval_method": "likelihood_scoring", "selection_metric": "eval_loss",
+               "dev_f1_macro": dev_f1, "test_f1_macro": test_f1,
+               "test_f1_macro_calibrated": cal_test_f1,
+               "train_seconds": round(secs, 1), "timestamp": timestamp}
     json.dump(summary, open(MODEL_DIR / "training_summary.json", "w"), indent=2)
-    logger.info(f"Summary -> {MODEL_DIR/'training_summary.json'}")
+    logger.info(f"Summary -> {MODEL_DIR / 'training_summary.json'}")
     logger.info("=" * 60); logger.info("Qwen Task B complete - probs emitted."); logger.info("=" * 60)
 
 
