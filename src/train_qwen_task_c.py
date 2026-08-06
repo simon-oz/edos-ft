@@ -25,6 +25,8 @@ Usage:
   CUDA_VISIBLE_DEVICES=0 python src/train_qwen_task_c.py --use_16bit_lora \
     --lr 5e-5 --lora_r 16 --lora_alpha 32 --epochs 3 --label_smoothing 0.05    
 
+  CUDA_VISIBLE_DEVICES=0 python src/train_qwen_task_a.py --use_16bit_lora \
+    --model_name models/qwen/dapt_lm/final
 """
 import sys, json, re, logging, argparse, time
 from datetime import datetime
