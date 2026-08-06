@@ -27,6 +27,10 @@ Usage:
   CUDA_VISIBLE_DEVICES=0 python src/train_qwen_task_a.py --use_16bit_lora \
     --lr 5e-5 --lora_r 16 --lora_alpha 32 --epochs 3
 
+  CUDA_VISIBLE_DEVICES=0 python src/train_qwen_task_a.py --use_16bit_lora \
+    --model_name models/qwen/dapt_lm/final \
+    --lr 5e-5 --lora_r 16 --lora_alpha 32 --epochs 4
+
   # verify this build is on disk:
   grep -nE "qwen_dev_probs.npy|likelihood_probs" src/train_qwen_task_a.py
 """
