@@ -68,5 +68,5 @@ Text: "Maybe he has a thing for Gauls, a lot of French women are pretty weird lo
 predicted: 2
 
 === NOW CLASSIFY ===
-I've uploaded 8 CSV files (test_id_text_1.csv through test_id_text_8.csv), each containing 500 rows with an `id` and a `text` field. Please classify every row and put your answer in a new field with name `predicted`. Your prediction should only be one of: "1", "2", "3", "4", or "none".
-Return each complete CSV with the same rows in the same order, adding only the `predicted` column, and no other text.
+I've uploaded the CSV file which containing an `id` and a `text` field. Please classify every row and put your answer in a new field with name `predicted`. Your prediction should only be one of: "1", "2", "3", "4", or "none".
+Return each complete CSV with the same rows in the same order with only the "id" column and the `predicted` column, and no other text.
